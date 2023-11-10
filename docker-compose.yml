@@ -1,0 +1,307 @@
+version: '3.8'
+
+services:
+# mongodb as persistent scada database for schema, gis and configuration data
+  mongodb:
+    image: mongo:6.0.4
+    container_name: mongodb
+    hostname: mongodb
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.2
+    env_file:
+      - .env
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_USER_DB}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_REPLICA_SET_NAME: ${MONGO_REPLICA_SET_NAME} # replicaset is needed for changestreams
+    ports:
+      - "27017:27017"
+    volumes: #WARNING: mongodb.key needs to be chmod 400 and chown 999:999 to work like this
+      - ./mongodb/mongodb.key:/data/mongodb.key
+      - ./mongodb/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: test $$(echo "rs.initiate().ok || rs.status().ok" | mongosh -u ${MONGO_INITDB_ROOT_USERNAME} -p ${MONGO_INITDB_ROOT_PASSWORD} --quiet) -eq 1
+      interval: 10s
+      start_period: 40s
+    command: ["--keyFile", "/data/mongodb.key", "--replSet", "${MONGO_REPLICA_SET_NAME}", "--bind_ip_all"]
+
+
+  mongoClientTemp:
+    image: mongo:6.0.4
+    container_name: mongoClientTemp
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.240
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_USER_DB: ${MONGO_USER_DB}
+      MONGO_USER_USERNAME: ${MONGO_USER_USERNAME}
+      MONGO_USER_PASSWORD: ${MONGO_USER_PASSWORD}
+    command: mongosh -u ${MONGO_INITDB_ROOT_USERNAME} -p ${MONGO_INITDB_ROOT_PASSWORD} --host mongodb --eval  "db.getSiblingDB('${MONGO_USER_DB}').createUser({user:'${MONGO_USER_USERNAME}', pwd:'${MONGO_USER_PASSWORD}', roles:[{role:'readWrite',db:'${MONGO_USER_DB}'}]});"
+    depends_on:
+      - mongodb
+
+
+# redis as real-time database for current values
+  redis:
+    image: "redis:alpine3.17"
+    container_name: redis
+    hostname: redis
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.3
+    env_file:
+      - .env
+    command: redis-server --requirepass ${REDIS_PASSWORD} --notify-keyspace-events K$$
+    ports:
+      - "6379:6379"
+
+
+# timeseries db for value storage
+# 8086 is the managment interface, username: admin, password: administrator
+  influxdb:
+    image: influxdb:2.6.1
+    container_name: influxdb
+    ports:
+      - "8083:8083"
+      - "8086:8086"
+      - "8090:8090"
+      - "2003:2003"
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.4
+    env_file:
+      - .env
+    #volumes:
+      # Optional data persistency on host
+      # sudo mkdir -p /srv/docker/influxdb/data
+      #- /srv/docker/influxdb/data:/var/lib/influxdb
+
+
+
+# the HMI webserver the user interacts with
+  scada_client:
+    build: ./client
+    container_name: scada_client
+    hostname: scada_client
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.5
+    env_file:
+      - .env
+    environment:
+      - IFS_REDIS_HOST=redis
+      - IFS_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - IFS_MONGODB_HOST=mongodb
+      - IFS_MONGODB_DB=${MONGO_USER_DB}
+      - IFS_MONGODB_USERNAME=${MONGO_USER_USERNAME}
+      - IFS_MONGODB_PASSWORD=${MONGO_USER_PASSWORD}
+      - IFS_INFLUXDB_HOST=http://influxdb:8086
+      - IFS_INFLUXDB_API=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      - IFS_INFLUXDB_ORG=${DOCKER_INFLUXDB_INIT_ORG}
+    depends_on:
+      - mongodb
+      - redis
+      - influxdb
+    ports:
+      - "5000:5000"
+
+
+# timeseries dashboard, username: admin, password: admin
+  grafana:
+    image: grafana/grafana-oss:9.3.6
+    container_name: grafana
+    hostname: grafana
+    ports:
+      - "3000:3000"
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.6
+    env_file:
+      - .env
+    environment:
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    user: "0"
+    links:
+      - influxdb
+    volumes:
+      # Data persistency
+      # sudo mkdir -p /srv/docker/grafana/data; chown 472:472 /srv/docker/grafana/data
+      # - /srv/docker/grafana/data:/var/lib/grafana
+      - ./grafana/dashboard.yaml:/etc/grafana/provisioning/dashboards/main.yaml
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+
+
+# manage containers, password: Administrator
+  portainer:
+    image: portainer/portainer-ce:2.17.0
+    container_name: portainer
+    hostname: portainer
+    ports:
+      - "8000:8000"
+      - "9443:9443"
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.7
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+
+
+### dataproviders ###
+
+# dataprovider for simple static values
+  static_dataprovider:
+    build: ./static_dataprovider
+    container_name: static_dataprovider
+    hostname: static_dataprovider
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.10
+    env_file:
+      - .env
+    environment:
+      - IFS_REDIS_HOST=redis
+      - IFS_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - IFS_INFLUXDB_HOST=http://influxdb:8086
+      - IFS_INFLUXDB_API=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      - IFS_INFLUXDB_ORG=${DOCKER_INFLUXDB_INIT_ORG}
+    depends_on:
+      - influxdb
+      - redis
+
+# a solver of network data
+  solver:
+    build: ./solver
+    container_name: solver
+    hostname: solver
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.11
+    env_file:
+      - .env
+    environment:
+      - IFS_REDIS_HOST=redis
+      - IFS_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - IFS_MONGODB_HOST=mongodb
+      - IFS_MONGODB_DB=${MONGO_USER_DB}
+      - IFS_MONGODB_USERNAME=${MONGO_USER_USERNAME}
+      - IFS_MONGODB_PASSWORD=${MONGO_USER_PASSWORD}
+      - IFS_INFLUXDB_HOST=http://influxdb:8086
+      - IFS_INFLUXDB_API=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      - IFS_INFLUXDB_ORG=${DOCKER_INFLUXDB_INIT_ORG}
+    depends_on:
+      - mongodb
+      - influxdb
+      - redis
+
+# an IEC60870-5-104 connector
+  ifs:
+    build: ./ifs
+    container_name: ifs
+    hostname: ifs
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.12
+      wannetwork:
+        ipv4_address: 10.1.0.2
+    env_file:
+      - .env
+    environment:
+      - IFS_REDIS_HOST=redis
+      - IFS_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - IFS_MONGODB_HOST=mongodb
+      - IFS_MONGODB_DB=${MONGO_USER_DB}
+      - IFS_MONGODB_USERNAME=${MONGO_USER_USERNAME}
+      - IFS_MONGODB_PASSWORD=${MONGO_USER_PASSWORD}
+      - IFS_INFLUXDB_HOST=http://influxdb:8086
+      - IFS_INFLUXDB_API=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      - IFS_INFLUXDB_ORG=${DOCKER_INFLUXDB_INIT_ORG}
+    depends_on:
+      - mongodb
+      - redis
+      - influxdb
+
+
+### test data ###
+
+  #simulated gateway for testing
+  test_gateway:
+    build: ./test_gateway
+    container_name: test_gateway
+    hostname: test_gateway
+    networks:
+      wannetwork:
+        ipv4_address: 10.1.0.10
+
+
+### backend management systems ###
+
+# management interface for mongodb, username: admin, password: admin
+  admin-mongo:
+    image: mongo-express:1.0.0-alpha.4
+    container_name: admin-mongo
+    hostname: admin-mongo
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.30
+    env_file:
+      - .env
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_OPTIONS_EDITORTHEME=ambiance
+      - ME_CONFIG_MONGODB_URL=mongodb://mongodb:27017/?replicaSet=${MONGO_REPLICA_SET_NAME}
+      - ME_CONFIG_BASICAUTH_USERNAME=admin
+      - ME_CONFIG_BASICAUTH_PASSWORD=admin
+      - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+    links:
+      - mongodb
+    depends_on:
+      - mongodb
+
+
+# management interface for redis, username: admin, password: admin
+  redis-commander:
+    container_name: redis-commander
+    hostname: redis-commander
+    image: rediscommander/redis-commander:latest
+    networks:
+      scadanetwork:
+        ipv4_address: 10.2.0.31
+    env_file:
+      - .env
+    environment:
+      - HTTP_USER=admin
+      - HTTP_PASSWORD=admin
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    ports:
+    - "8082:8081"
+
+
+volumes:
+  portainer_data:
+
+networks:
+  scadanetwork:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.2.0.0/24
+
+  wannetwork:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.1.0.0/24

@@ -1,0 +1,39 @@
+add some alarm logic
+ - alarm on circuit-breaker open (substation 1)
+ - alarm on undervoltage/overvoltage (substation 1 and 2, voltage measurements)
+
+
+-- future --
+main client authentication
+support restricted areas of responsiblity/operation
+
+oper dialog status msg after succes/failed oper
+
+editable layer/item order? map.getPane('labels').style.zIndex = 650???
+
+script fire on alarm logic
+ - what logic? should it be 
+ - pyeval? (server side python app context?, if so, how to restrict?)
+ - shell?
+ - trigger other events?
+ - modify scada views?
+ - email/sms?
+alarm grouping?
+
+scaling values in IFS (before storage)
+scaling values in GUI (only on display)
+
+iccp-connector?
+iec61850 ifs?
+modbus ifs?
+tase.2 ifs?
+dnp3 ifs?
+opc ifs?
+
+edit dataprovider ip
+
+snap leaflet
+
+solve trafo values, do disconnect/ground detect, and detect value conflics
+
+https://yqnn.github.io/svg-path-editor/
